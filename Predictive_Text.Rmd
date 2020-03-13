@@ -1,0 +1,1459 @@
+---
+title: "Milestone Report"
+author: "Diógenes Cruz Figueroa García"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output: html_document
+
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = FALSE, error = FALSE, message = FALSE, warning = FALSE)
+```
+
+# 1. Synopsis
+This document is prepared as the final project (Capstone) in the JHU-Coursera
+Data Science Specialization. The capstone is done in conjunction with SwiftKey, 
+a software developing company famous for it's keyboard with predictive 
+algorithms. The idea behind this project is to simulate an algorithm for a 
+predictive keyboard, and to develop a corresponding application. Through this 
+project, we'll be tackling text data analysis, natural language processing, and 
+product development.
+
+# 2. Exploratory data Analysis
+
+For this project, we're given some data sets of consisting of multiple lines of 
+text written in english (though german, russian and finnish are also available) 
+and analyzing those texts using R. The data sets can be downloaded from 
+[here](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip).
+
+## 2.1 Loading and looking at the data
+
+We'll focus on the english data, available in the `final/en_US/` directory, 
+which contains three text files:
+
+* en_US.blogs.txt
+* en_US.news.txt
+* en_US.twitter.txt
+
+Each file contains several lines of text corresponding to either blogs, news or 
+tweets, which can be analyzed to see which words naturally follow which ones in 
+a natural language setting. In the Appendix it'll be shown which packages we'll 
+be using for our analysis.
+
+The following R packages are used for this analysis: `dplyr`, `tidyr`, 
+`ggplot2`, `LaF`, `tokenizers`, `stringr`, `stringi`, `quanteda`, `data.table`, 
+`caret`, and, clearly, `knitr`.
+
+```{r loading_packages, echo = FALSE}
+library(LaF); library(dplyr); library(tidyr); library(ggplot2); 
+library(tokenizers); library(stringi); library(quanteda); library(data.table); 
+library(stringr); library(knitr); library(caret)
+```
+
+First, let's load the data, and make a summary table of it:
+
+```{r loading_the_data, cache = TRUE, echo = FALSE}
+# Gettin and loading the data
+
+if(!file.exists(".\\Data\\Coursera-SwiftKey.zip")){
+     download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip", 
+                   destfile = ".\\Coursera-SwiftKey.zip")
+}
+
+twitterFile <- ".\\Data\\final\\en_US\\en_US.twitter.txt"
+blogsFile <- ".\\Data\\final\\en_US\\en_US.blogs.txt"
+newsFile <- ".\\Data\\final\\en_US\\en_US.news.txt"
+
+# Get whole data set
+con1 <- file(twitterFile, "r")
+con2 <- file(blogsFile, "r")
+con3 <- file(newsFile, "r")
+
+twitter <- readLines(con1, encoding = "UTF-8", skipNul = TRUE)
+close(con1)
+blogs <- readLines(con2, encoding = "UTF-8", skipNul = TRUE)
+close(con2)
+news <- readLines(con3, encoding = "UTF-8", skipNul = TRUE)
+close(con3)
+rm(con1, con2, con3)
+```
+
+And to take a quick look at it:
+
+```{r looking_at_data, cache = TRUE, echo = FALSE}
+# Let's do some general exploratory analysis
+body <- list(twitter, blogs, news)
+linecharstat<-  sapply(body,stri_stats_general)[c('Lines','Chars'),]
+wordcount <- sapply(body,stri_stats_latex)[c('Words'),]
+wordsummary <- sapply(body,function(x) summary(stri_count_words(x))[c('Min.','Mean','Max.')])
+descstat <- as.data.frame(rbind(linecharstat,wordcount,wordsummary))
+
+colnames(descstat)<- c("Twitter","Blogs","News")
+rownames(descstat) <- c("Lines","Characters","Words","Min words per line", 
+                        "Mean words per line","Max words per line")
+descstat <- format(descstat,scientific = FALSE,digits=0,big.mark=",")
+
+knitr::kable(descstat, "markdown", caption = "Text Data Summary Statistics")
+rm(body, linecharstat, wordcount, wordsummary, descstat)
+
+```
+
+As you can see, we have really big data sets, weighting over 550 MB between 
+them all. So, due to my computer having not so much processing capacity, and 
+given the weight or the data bases, we'll be working with random samples from 
+the data sets. The sampling method uses the `sample_lines()` function from the 
+`LaF` package. We'll be working with samples of 10% of the total lines per data 
+base. From this 10%, 20% will be for our training set, and 5% for our testing set. 
+Although my computer allows for a bigger data set for exploratory data analysis, 
+when it comes to fiting models and prediction, it just doesn't have enough memory.
+
+## 2.2 Cleaning and partitioning our data sets
+
+```{r sampling_data_bases, echo = FALSE, cache = TRUE}
+set.seed(122814)
+s_twitter <- sample_lines(twitterFile, round(length(twitter) * .10))
+set.seed(215)
+s_blogs <- sample_lines(blogsFile, round(length(blogs) * .10))
+set.seed(4530)
+s_news <- sample_lines(newsFile, round(length(news) * .10))
+
+rm(twitterFile, blogsFile, newsFile)
+rm(twitter, blogs, news)
+```
+
+So, we now have samples 25% the size of our original data sets, but given the 
+size of the datasets, it should suffice (for my computer's sake). 
+The following step is to extract the relevant data from the sample data sets. 
+This is, we're not interested in whole stories being told in blogs, news or 
+tweets, but on the individual frequency of words and phrases, as well as 
+knowing which words follow which ones. 
+
+To do this, we'll be using the `quanteda` package, as well as the `base` 
+package and regular expressions, to extract from the texts sets of words 
+(tokens), as well as ngrams (sequence of tokens). To do this, I've created a 
+simple function to allow me to extract tokens and ngrams of n-number of words. 
+This function can be then applied to our data samples to get the most common 
+tokens (words) and ngrams (sequence of tokens).
+
+For this example, we'll be working with the most common tokens considering all 
+words, as well as excluding so called stopwords (words that are very common but 
+have little meaning in an overall analysis, such as "the", "is", among others). 
+Luckily, the package `quanteda` exports a `stopwords()` function which includes 
+a list of `175` english common words which can be excluded from the analysis. 
+We'll also be looking at the most common 2 token ngrams and 3 token ngrams.
+
+We'll plot our results on the training data set.
+
+```{r list_tokens_function, echo = FALSE, cache = TRUE}
+# First we'll convert everything from UTF-8 to ASCII to avoid special 
+# characters such as accents, and what not.
+s_twitter <- iconv(s_twitter, from = "UTF-8", to = "ASCII//TRANSLIT")
+s_blogs <- iconv(s_blogs, from = "UTF-8", to = "ASCII//TRANSLIT")
+s_news <- iconv(s_news, from = "UTF-8", to = "ASCII//TRANSLIT")
+
+# Now the formula for getting the most common tokens and ngrams
+
+list_tokens <- function(x, ngrams = 1, stopwords = TRUE, lan = "english"){
+     if(ngrams > 2 & stopwords == FALSE)
+          stop("Stopwords can only be removed if ngrams equals 2 or less")
+     nosymb <- "#|$|%|&|/|(|)|="
+     x <- tolower(x)
+     x <- gsub(nosymb, "", x)
+     toks <- tokens(x, remove_punct = TRUE, remove_symbols = TRUE, 
+                    remove_separators = TRUE, split_hyphens = TRUE, 
+                    remove_url = TRUE, remove_numbers = TRUE)
+     if(stopwords == FALSE)
+          toks <- tokens_select(toks, stopwords(lan), selection = "remove")
+     toks_ngram <- tokens_ngrams(toks, n = ngrams, skip = 0L, concatenator = " ")
+     toks_ngram <- unlist(toks_ngram)
+     token_data_frame <- data.frame(table(toks_ngram))
+     names(token_data_frame) <- c("Token", "Abs.Freq")
+     table <- token_data_frame[order(-token_data_frame$Abs.Freq), ]
+     table$Rel.Freq <- table$Abs.Freq / sum(table$Abs.Freq) * 100
+     table$Cum.Freq <- cumsum(table$Rel.Freq)
+     table$Token <- as.character(table$Token)
+     return(table)
+}
+
+if(!file.exists(".\\ManipulatedData\\Samples")){dir.create(".\\ManipulatedData\\Samples")}
+write.csv(s_twitter, file = ".\\ManipulatedData\\Samples\\s_twitter.csv")
+write.csv(s_blogs, file = ".\\ManipulatedData\\Samples\\s_blogs.csv")
+write.csv(s_news, file = ".\\ManipulatedData\\Samples\\s_news.csv")
+```
+
+```{r getting_tokens_and_ngrams, cache = TRUE, echo = FALSE}
+if(!file.exists(".\\ManipulatedData\\Ngrams")){dir.create(".\\ManipulatedData\\Ngrams")}
+
+######### Using all words   
+tw_table1 <- list_tokens(s_twitter, 1)
+write.csv(tw_table1, file = ".\\ManipulatedData\\Ngrams\\tw_table1.csv")
+rm(tw_table1)
+
+bg_table1 <- list_tokens(s_blogs, 1)
+write.csv(bg_table1, file = ".\\ManipulatedData\\Ngrams\\bg_table1.csv")
+rm(bg_table1)
+
+nw_table1 <- list_tokens(s_news, 1)
+write.csv(nw_table1, file = ".\\ManipulatedData\\Ngrams\\nw_table1.csv")
+rm(nw_table1)
+
+
+######### Removing stop words
+tw_table1_nsw <- list_tokens(s_twitter, 1, stopwords = FALSE, lan = "english")
+write.csv(tw_table1_nsw, file = ".\\ManipulatedData\\Ngrams\\tw_table1_nsw.csv")
+rm(tw_table1_nsw)
+
+bg_table1_nsw <- list_tokens(s_blogs, 1, stopwords = FALSE, lan = "english")
+write.csv(bg_table1_nsw, file = ".\\ManipulatedData\\Ngrams\\bg_table1_nsw.csv")
+rm(bg_table1_nsw)
+
+nw_table1_nsw <- list_tokens(s_news, 1, stopwords = FALSE, lan = "english")
+write.csv(nw_table1_nsw, file = ".\\ManipulatedData\\Ngrams\\nw_table1_nsw.csv")
+rm(nw_table1_nsw)
+
+####### For a 2 word ngram
+tw_table2 <- list_tokens(s_twitter, 2)
+write.csv(tw_table2, file = ".\\ManipulatedData\\Ngrams\\tw_table2.csv")
+rm(tw_table2)
+
+bg_table2 <- list_tokens(s_blogs, 2)
+write.csv(bg_table2, file = ".\\ManipulatedData\\Ngrams\\bg_table2.csv")
+rm(bg_table2)
+
+nw_table2 <- list_tokens(s_news, 2)
+write.csv(nw_table2, file = ".\\ManipulatedData\\Ngrams\\nw_table2.csv")
+rm(nw_table2)
+
+###### For a 2 word ngram without stopwords
+tw_table2_nsw <- list_tokens(s_twitter, 2, stopwords = FALSE, lan = "english")
+write.csv(tw_table2_nsw, file = ".\\ManipulatedData\\Ngrams\\tw_table2_nsw.csv")
+rm(tw_table2_nsw)
+
+bg_table2_nsw <- list_tokens(s_blogs, 2, stopwords = FALSE, lan = "english")
+write.csv(bg_table2_nsw, file = ".\\ManipulatedData\\Ngrams\\bg_table2_nsw.csv")
+rm(bg_table2_nsw)
+
+nw_table2_nsw <- list_tokens(s_news, 2, stopwords = FALSE, lan = "english")
+write.csv(nw_table2_nsw, file = ".\\ManipulatedData\\Ngrams\\nw_table2_nsw.csv")
+rm(nw_table2_nsw)
+
+
+###### For a 3 word ngram
+tw_table3 <- list_tokens(s_twitter, 3)
+write.csv(tw_table3, file = ".\\ManipulatedData\\Ngrams\\tw_table3.csv")
+rm(tw_table3)
+
+bg_table3 <- list_tokens(s_blogs, 3)
+write.csv(bg_table3, file = ".\\ManipulatedData\\Ngrams\\bg_table3.csv")
+rm(bg_table3)
+
+nw_table3 <- list_tokens(s_news, 3)
+write.csv(nw_table3, file = ".\\ManipulatedData\\Ngrams\\nw_table3.csv")
+rm(nw_table3)
+
+# For a 4 word ngram
+tw_table4 <- list_tokens(s_twitter, 4)
+write.csv(tw_table4, file = ".\\ManipulatedData\\Ngrams\\tw_table4.csv")
+rm(tw_table4)
+
+bg_table4 <- list_tokens(s_blogs, 4)
+write.csv(bg_table4, file = ".\\ManipulatedData\\Ngrams\\bg_table4.csv")
+rm(bg_table4)
+
+nw_table4 <- list_tokens(s_news, 4)
+write.csv(nw_table4, file = ".\\ManipulatedData\\Ngrams\\nw_table4.csv")
+rm(nw_table4)
+
+
+# Remove sample databases
+rm(s_twitter, s_blogs, s_news)
+```
+
+```{r getting_train_and_test_datasets, cache = TRUE}
+if(!file.exists(".\\ManipulatedData\\TrainSets")){dir.create(".\\ManipulatedData\\TrainSets")}
+if(!file.exists(".\\ManipulatedData\\TestSets")){dir.create(".\\ManipulatedData\\TestSets")}
+
+### TWITTWER ###
+# Using all words
+tw_table1 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\tw_table1.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+set.seed(263)
+inTrain <- createDataPartition(y = tw_table1$Token, p = 0.8, list = FALSE)
+  tw_train_table1 <- tw_table1[inTrain, ]
+  tw_test_table1 <- tw_table1[-inTrain, ]
+  write.csv(tw_train_table1, file = ".\\ManipulatedData\\TrainSets\\tw_train_table1.csv")
+  write.csv(tw_test_table1, file = ".\\ManipulatedData\\TestSets\\tw_test_table1.csv")
+  rm(tw_table1, tw_test_table1)
+
+# Removing stop words
+tw_table1_nsw <- read.csv(file = ".\\ManipulatedData\\Ngrams\\tw_table1_nsw.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+set.seed(263)
+inTrain <- createDataPartition(y = tw_table1_nsw$Token, p = 0.8, list = FALSE)
+  tw_train_table1_nsw <- tw_table1_nsw[inTrain, ]
+  tw_test_table1_nsw <- tw_table1_nsw[-inTrain, ]
+  write.csv(tw_train_table1_nsw, file = ".\\ManipulatedData\\TrainSets\\tw_train_table1_nsw.csv")
+  write.csv(tw_test_table1_nsw, file = ".\\ManipulatedData\\TestSets\\tw_test_table1_nsw.csv")
+  rm(tw_table1_nsw, tw_test_table1_nsw)
+
+# For a 2 word ngram
+tw_table2 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\tw_table2.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_tw_table2 <- separate(tw_table2, Token, into = c("w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_tw_table2$Token, p = 0.8, list = FALSE)
+  tw_train_table2 <- aux_tw_table2[inTrain, ]
+  tw_test_table2 <- aux_tw_table2[-inTrain, ]
+  write.csv(tw_train_table2, file = ".\\ManipulatedData\\TrainSets\\tw_train_table2.csv")
+  write.csv(tw_test_table2, file = ".\\ManipulatedData\\TestSets\\tw_test_table2.csv")
+  rm(tw_table2, tw_test_table2, aux_tw_table2)
+
+# For a 2 word ngram without stopwords
+tw_table2_nsw <- read.csv(file = ".\\ManipulatedData\\Ngrams\\tw_table2_nsw.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_tw_table2_nsw <- separate(tw_table2_nsw, Token, into = c("w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_tw_table2_nsw$Token, p = 0.8, list = FALSE)
+  tw_train_table2_nsw <- aux_tw_table2_nsw[inTrain, ]
+  tw_test_table2_nsw <- aux_tw_table2_nsw[-inTrain, ]
+  write.csv(tw_train_table2_nsw, file = ".\\ManipulatedData\\TrainSets\\tw_train_table2_nsw.csv")
+  write.csv(tw_test_table2_nsw, file = ".\\ManipulatedData\\TestSets\\tw_test_table2_nsw.csv")
+  rm(tw_table2_nsw, tw_test_table2_nsw, aux_tw_table2_nsw)
+  
+# For a 3 word ngram
+tw_table3 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\tw_table3.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_tw_table3 <- separate(tw_table3, Token, into = c("w-2","w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_tw_table3$Token, p = 0.8, list = FALSE)
+tw_train_table3 <- aux_tw_table3[inTrain, ]
+tw_test_table3 <- aux_tw_table3[-inTrain, ]
+write.csv(tw_train_table3, file = ".\\ManipulatedData\\TrainSets\\tw_train_table3.csv")
+write.csv(tw_test_table3, file = ".\\ManipulatedData\\TestSets\\tw_test_table3.csv")
+rm(tw_table3, tw_test_table3, aux_tw_table3)
+
+
+# For a 4 word ngram
+tw_table4 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\tw_table4.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_tw_table4 <- separate(tw_table4, Token, into = c("w-3", "w-2","w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_tw_table4$Token, p = 0.8, list = FALSE)
+tw_train_table4 <- aux_tw_table4[inTrain, ]
+tw_test_table4 <- aux_tw_table4[-inTrain, ]
+write.csv(tw_train_table4, file = ".\\ManipulatedData\\TrainSets\\tw_train_table4.csv")
+write.csv(tw_test_table4, file = ".\\ManipulatedData\\TestSets\\tw_test_table4.csv")
+rm(tw_table4, tw_test_table4, aux_tw_table4)
+
+
+### BLOGS ###
+# Using all words
+
+bg_table1 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\bg_table1.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+set.seed(263)
+inTrain <- createDataPartition(y = bg_table1$Token, p = 0.8, list = FALSE)
+bg_train_table1 <- bg_table1[inTrain, ]
+bg_test_table1 <- bg_table1[-inTrain, ]
+write.csv(bg_train_table1, file = ".\\ManipulatedData\\TrainSets\\bg_train_table1.csv")
+write.csv(bg_test_table1, file = ".\\ManipulatedData\\TestSets\\bg_test_table1.csv")
+rm(bg_table1, bg_test_table1)
+
+# Removing stop words
+bg_table1_nsw <- read.csv(file = ".\\ManipulatedData\\Ngrams\\bg_table1_nsw.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+set.seed(263)
+inTrain <- createDataPartition(y = bg_table1_nsw$Token, p = 0.8, list = FALSE)
+bg_train_table1_nsw <- bg_table1_nsw[inTrain, ]
+bg_test_table1_nsw <- bg_table1_nsw[-inTrain, ]
+write.csv(bg_train_table1_nsw, file = ".\\ManipulatedData\\TrainSets\\bg_train_table1_nsw.csv")
+write.csv(bg_test_table1_nsw, file = ".\\ManipulatedData\\TestSets\\bg_test_table1_nsw.csv")
+rm(bg_table1_nsw, bg_test_table1_nsw)
+
+# For a 2 word ngram
+bg_table2 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\bg_table2.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_bg_table2 <- separate(bg_table2, Token, into = c("w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_bg_table2$Token, p = 0.8, list = FALSE)
+bg_train_table2 <- aux_bg_table2[inTrain, ]
+bg_test_table2 <- aux_bg_table2[-inTrain, ]
+write.csv(bg_train_table2, file = ".\\ManipulatedData\\TrainSets\\bg_train_table2.csv")
+write.csv(bg_test_table2, file = ".\\ManipulatedData\\TestSets\\bg_test_table2.csv")
+rm(bg_table2, bg_test_table2, aux_bg_table2)
+
+# For a 2 word ngram without stopwords
+bg_table2_nsw <- read.csv(file = ".\\ManipulatedData\\Ngrams\\bg_table2_nsw.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_bg_table2_nsw <- separate(bg_table2_nsw, Token, into = c("w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_bg_table2_nsw$Token, p = 0.8, list = FALSE)
+bg_train_table2_nsw <- aux_bg_table2_nsw[inTrain, ]
+bg_test_table2_nsw <- aux_bg_table2_nsw[-inTrain, ]
+write.csv(bg_train_table2_nsw, file = ".\\ManipulatedData\\TrainSets\\bg_train_table2_nsw.csv")
+write.csv(bg_test_table2_nsw, file = ".\\ManipulatedData\\TestSets\\bg_test_table2_nsw.csv")
+rm(bg_table2_nsw, bg_test_table2_nsw, aux_bg_table2_nsw)
+
+# For a 3 word ngram
+bg_table3 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\bg_table3.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_bg_table3 <- separate(bg_table3, Token, into = c("w-2","w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_bg_table3$Token, p = 0.8, list = FALSE)
+bg_train_table3 <- aux_bg_table3[inTrain, ]
+bg_test_table3 <- aux_bg_table3[-inTrain, ]
+write.csv(bg_train_table3, file = ".\\ManipulatedData\\TrainSets\\bg_train_table3.csv")
+write.csv(bg_test_table3, file = ".\\ManipulatedData\\TestSets\\bg_test_table3.csv")
+rm(bg_table3, bg_test_table3, aux_bg_table3)
+
+
+# For a 4 word ngram
+bg_table4 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\bg_table4.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_bg_table4 <- separate(bg_table4, Token, into = c("w-3", "w-2","w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_bg_table4$Token, p = 0.8, list = FALSE)
+bg_train_table4 <- aux_bg_table4[inTrain, ]
+bg_test_table4 <- aux_bg_table4[-inTrain, ]
+write.csv(bg_train_table4, file = ".\\ManipulatedData\\TrainSets\\bg_train_table4.csv")
+write.csv(bg_test_table4, file = ".\\ManipulatedData\\TestSets\\bg_test_table4.csv")
+rm(bg_table4, bg_test_table4, aux_bg_table4)
+
+
+### NEWS ###
+# Using all words
+nw_table1 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\nw_table1.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+set.seed(263)
+inTrain <- createDataPartition(y = nw_table1$Token, p = 0.8, list = FALSE)
+nw_train_table1 <- nw_table1[inTrain, ]
+nw_test_table1 <- nw_table1[-inTrain, ]
+write.csv(nw_train_table1, file = ".\\ManipulatedData\\TrainSets\\nw_train_table1.csv")
+write.csv(nw_test_table1, file = ".\\ManipulatedData\\TestSets\\nw_test_table1.csv")
+rm(nw_table1, nw_test_table1)
+
+# Removing stop words
+nw_table1_nsw <- read.csv(file = ".\\ManipulatedData\\Ngrams\\nw_table1_nsw.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+set.seed(263)
+inTrain <- createDataPartition(y = nw_table1_nsw$Token, p = 0.8, list = FALSE)
+nw_train_table1_nsw <- nw_table1_nsw[inTrain, ]
+nw_test_table1_nsw <- nw_table1_nsw[-inTrain, ]
+write.csv(nw_train_table1_nsw, file = ".\\ManipulatedData\\TrainSets\\nw_train_table1_nsw.csv")
+write.csv(nw_test_table1_nsw, file = ".\\ManipulatedData\\TestSets\\nw_test_table1_nsw.csv")
+rm(nw_table1_nsw, nw_test_table1_nsw)
+
+# For a 2 word ngram
+nw_table2 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\nw_table2.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_nw_table2 <- separate(nw_table2, Token, into = c("w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_nw_table2$Token, p = 0.8, list = FALSE)
+nw_train_table2 <- aux_nw_table2[inTrain, ]
+nw_test_table2 <- aux_nw_table2[-inTrain, ]
+write.csv(nw_train_table2, file = ".\\ManipulatedData\\TrainSets\\nw_train_table2.csv")
+write.csv(nw_test_table2, file = ".\\ManipulatedData\\TestSets\\nw_test_table2.csv")
+rm(nw_table2, nw_test_table2, aux_nw_table2)
+
+# For a 2 word ngram without stopwords
+nw_table2_nsw <- read.csv(file = ".\\ManipulatedData\\Ngrams\\nw_table2_nsw.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_nw_table2_nsw <- separate(nw_table2_nsw, Token, into = c("w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_nw_table2_nsw$Token, p = 0.8, list = FALSE)
+nw_train_table2_nsw <- aux_nw_table2_nsw[inTrain, ]
+nw_test_table2_nsw <- aux_nw_table2_nsw[-inTrain, ]
+write.csv(nw_train_table2_nsw, file = ".\\ManipulatedData\\TrainSets\\nw_train_table2_nsw.csv")
+write.csv(nw_test_table2_nsw, file = ".\\ManipulatedData\\TestSets\\nw_test_table2_nsw.csv")
+rm(nw_table2_nsw, nw_test_table2_nsw, aux_nw_table2_nsw)
+
+# For a 3 word ngram
+nw_table3 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\nw_table3.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_nw_table3 <- separate(nw_table3, Token, into = c("w-2","w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_nw_table3$Token, p = 0.8, list = FALSE)
+nw_train_table3 <- aux_nw_table3[inTrain, ]
+nw_test_table3 <- aux_nw_table3[-inTrain, ]
+write.csv(nw_train_table3, file = ".\\ManipulatedData\\TrainSets\\nw_train_table3.csv")
+write.csv(nw_test_table3, file = ".\\ManipulatedData\\TestSets\\nw_test_table3.csv")
+rm(nw_table3, nw_test_table3, aux_nw_table3)
+
+
+# For a 4 word ngram
+nw_table4 <- read.csv(file = ".\\ManipulatedData\\Ngrams\\nw_table4.csv", header = TRUE, 
+                      stringsAsFactors = FALSE)[, 2:5]
+aux_nw_table4 <- separate(nw_table4, Token, into = c("w-3", "w-2","w-1", "Token"), sep = " ")
+set.seed(263)
+inTrain <- createDataPartition(y = aux_nw_table4$Token, p = 0.8, list = FALSE)
+nw_train_table4 <- aux_nw_table4[inTrain, ]
+nw_test_table4 <- aux_nw_table4[-inTrain, ]
+write.csv(nw_train_table4, file = ".\\ManipulatedData\\TrainSets\\nw_train_table4.csv")
+write.csv(nw_test_table4, file = ".\\ManipulatedData\\TestSets\\nw_test_table4.csv")
+rm(nw_table4, nw_test_table4, aux_nw_table4)
+
+rm(inTrain)
+```
+
+## 2.3 Plotting our results {.tabset}
+
+The following tabs show occurance of each token or ngram for twitter, blogs and news. 
+For quick Reference:
+
+* 1T. Most common tokens
+* 1T-nsw. Most commont tokens, without stopwords
+* 2T. Most common 2-token ngrams
+* 2T-nsw. Most common 2-token ngrams, without stopwords
+* 3T. Most common 3-token ngrams
+* 4T. Most common 4-token ngrams
+
+```{r Uniting_training_sets_for_exploratory_data_analysis, cache = TRUE}
+
+# For plotting purposes, we'll temporarily unite the text once again
+
+tw_train_table2 <- unite(tw_train_table2, "Token", c("w-1", "Token"), sep = " ")
+bg_train_table2 <- unite(bg_train_table2, "Token", c("w-1", "Token"), sep = " ")
+nw_train_table2 <- unite(nw_train_table2, "Token", c("w-1", "Token"), sep = " ")
+
+tw_train_table2_nsw <- unite(tw_train_table2_nsw, "Token", c("w-1", "Token"), sep = " ")
+nw_train_table2_nsw <- unite(nw_train_table2_nsw, "Token", c("w-1", "Token"), sep = " ")
+bg_train_table2_nsw <- unite(bg_train_table2_nsw, "Token", c("w-1", "Token"), sep = " ")
+
+tw_train_table3 <- unite(tw_train_table3, "Token", c("w-2", "w-1", "Token"), sep = " ")
+bg_train_table3 <- unite(bg_train_table3, "Token", c("w-2", "w-1", "Token"), sep = " ")
+nw_train_table3 <- unite(nw_train_table3, "Token", c("w-2", "w-1", "Token"), sep = " ")
+
+tw_train_table4 <- unite(tw_train_table4, "Token", c("w-3", "w-2", "w-1", "Token"), sep = " ")
+bg_train_table4 <- unite(bg_train_table4, "Token", c("w-3", "w-2", "w-1", "Token"), sep = " ")
+nw_train_table4 <- unite(nw_train_table4, "Token", c("w-3", "w-2", "w-1", "Token"), sep = " ")
+```
+
+
+### 1T {.tabset}
+
+<font size="5">Most common tokens</font>
+
+#### Twitter
+```{r ggplot_tw_tokens1, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+options(scipen = 7)
+ggplot(data = head(tw_train_table1, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "steelblue", fill = "deepskyblue2") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Twitter") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### Blogs
+```{r ggplot_bg_tokens1, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+options(scipen = 7)
+ggplot(data = head(bg_train_table1, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "gold4", fill = "gold1") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Blogs") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### News
+```{r ggplot_nw_tokens1, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+options(scipen = 7)
+ggplot(data = head(nw_train_table1, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey50") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "News") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+### 1T-nsw {.tabset}
+
+<font size="5">Most common tokens, without stopwords</font>
+
+#### Twitter
+```{r ggplot_tw_tokens1_nsw, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(tw_train_table1_nsw, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "steelblue", fill = "deepskyblue2") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Twitter") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### Blogs
+```{r ggplot_bg_tokens1_nsw, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(bg_train_table1_nsw, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "gold4", fill = "gold1") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Blogs") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### News
+```{r ggplot_nw_tokens1_nsw, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(nw_train_table1_nsw, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey50") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "News") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+### 2T {.tabset}
+
+<font size="5">Most common 2-token ngrams</font>
+
+#### Twitter
+```{r ggplot_tw_tokens2, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(tw_train_table2, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "steelblue", fill = "deepskyblue2") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Twitter") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### Blogs
+```{r ggplot_bg_tokens2, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(bg_train_table2, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "gold4", fill = "gold1") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Blogs") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### News
+```{r ggplot_nw_tokens2, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(nw_train_table2, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey50") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "News") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+### 2T-nsw {.tabset}
+
+<font size="5">Most common 2-token ngrams, without stopwords</font>
+
+#### Twitter
+```{r ggplot_tw_tokens2_nsw, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(tw_train_table2_nsw, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "steelblue", fill = "deepskyblue2") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Twitter") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### Blogs
+```{r ggplot_bg_tokens2_nsw, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(bg_train_table2_nsw, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "gold4", fill = "gold1") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Blogs") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### News
+```{r ggplot_nw_tokens2_nsw, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(nw_train_table2_nsw, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey50") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "News") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+### 3T {.tabset}
+
+<font size="5">Most common 3-token ngrams</font>
+
+#### Twitter
+```{r ggplot_tw_tokens3, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(tw_train_table3, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "steelblue", fill = "deepskyblue2") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Twitter") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### Blogs
+```{r ggplot_bg_tokens3, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(bg_train_table3, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "gold4", fill = "gold1") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Blogs") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### News
+```{r ggplot_nw_tokens3, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(nw_train_table3, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey50") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "News") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+### 4T {.tabset}
+
+<font size="5">Most common 4-token ngrams</font>
+
+#### Twitter
+```{r ggplot_tw_tokens4, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(tw_train_table4, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "steelblue", fill = "deepskyblue2") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Twitter") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### Blogs
+```{r ggplot_bg_tokens4, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(bg_train_table4, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "gold4", fill = "gold1") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "Blogs") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+#### News
+```{r ggplot_nw_tokens4, echo = FALSE, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+ggplot(data = head(nw_train_table4, 20), aes(x = reorder(Token, -Abs.Freq), y = Abs.Freq)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey50") + 
+  xlab("Token") + ylab("Frequency") + labs(title = "News") + 
+  theme(axis.text.x = element_text(angle=45, hjust=1, size = 15), 
+        axis.text.y = element_text(hjust=1, size = 15), 
+        axis.title.x = element_text(size = 15, color = "grey50"), 
+        axis.title.y = element_text(size = 15, color = "grey50"))
+```
+
+
+
+## 2.4 Word Coverage {.tabset}
+
+Now we want to see how many words amount to which percentage of the total number of words. 
+For this, we'll create some basic plots that will help ilustrate this. We will notice that a 
+relatively small number of words cover 50% of the words, and the number increases rapidly to 
+cover almost 80% of total word usage, after which the rate rapidely decreases.
+For quick Reference:
+
+* 1T. Most common tokens
+* 1T-nsw. Most commont tokens, without stopwords
+* 2T. Most common 2-token ngrams
+* 2T-nsw. Most common 2-token ngrams, without stopwords
+* 3T. Most common 3-token ngrams
+* 4T. Most common 4-token ngrams
+
+### 1T {.tabset}
+
+<font size="5">Cumulative distribution of tokens</font>
+
+#### Twitter
+```{r cum1_tw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_tw_words1 <- 1:length(tw_train_table1$Cum.Freq)
+plot(x = unique_tw_words1, tw_train_table1$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", xlim = c(0, 25000), axes = FALSE, 
+     xlab = "Unique Words", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of words appearing in twitter")
+box()
+
+tw_50th <- (tw_train_table1$Cum.Freq - 50)  ^ 2
+abline(v = which(tw_50th == min(tw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+tw_80th <- (tw_train_table1$Cum.Freq - 80)  ^ 2
+abline(v = which(tw_80th == min(tw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+tw_90th <- (tw_train_table1$Cum.Freq - 90)  ^ 2
+abline(v = which(tw_90th == min(tw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+tw_95th <- (tw_train_table1$Cum.Freq - 95)  ^ 2
+abline(v = which(tw_95th == min(tw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+tw_x_axis = c(which(tw_50th == min(tw_50th)), 
+              which(tw_80th == min(tw_80th)), 
+              which(tw_90th == min(tw_90th)), 
+              which(tw_95th == min(tw_95th))
+              )
+axis(1, at = tw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+```
+
+#### Blogs
+```{r cum1_bg_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_bg_words1 <- 1:length(bg_train_table1$Cum.Freq)
+plot(x = unique_bg_words1, bg_train_table1$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", xlim = c(0, 25000), axes = FALSE, 
+     xlab = "Unique Words", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of words appearing in blogs")
+box()
+
+bg_50th <- (bg_train_table1$Cum.Freq - 50)  ^ 2
+abline(v = which(bg_50th == min(bg_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+bg_80th <- (bg_train_table1$Cum.Freq - 80)  ^ 2
+abline(v = which(bg_80th == min(bg_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+bg_90th <- (bg_train_table1$Cum.Freq - 90)  ^ 2
+abline(v = which(bg_90th == min(bg_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+bg_95th <- (bg_train_table1$Cum.Freq - 95)  ^ 2
+abline(v = which(bg_95th == min(bg_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+bg_x_axis = c(which(bg_50th == min(bg_50th)), 
+              which(bg_80th == min(bg_80th)), 
+              which(bg_90th == min(bg_90th)), 
+              which(bg_95th == min(bg_95th))
+)
+axis(1, at = bg_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+```
+
+#### News
+```{r cum1_nw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_nw_words1 <- 1:length(nw_train_table1$Cum.Freq)
+plot(x = unique_nw_words1, nw_train_table1$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", xlim = c(0, 25000), axes = FALSE, 
+     xlab = "Unique Words", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of words appearing in news")
+box()
+
+nw_50th <- (nw_train_table1$Cum.Freq - 50)  ^ 2
+abline(v = which(nw_50th == min(nw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+nw_80th <- (nw_train_table1$Cum.Freq - 80)  ^ 2
+abline(v = which(nw_80th == min(nw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+nw_90th <- (nw_train_table1$Cum.Freq - 90)  ^ 2
+abline(v = which(nw_90th == min(nw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+nw_95th <- (nw_train_table1$Cum.Freq - 95)  ^ 2
+abline(v = which(nw_95th == min(nw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+nw_x_axis = c(which(nw_50th == min(nw_50th)), 
+              which(nw_80th == min(nw_80th)), 
+              which(nw_90th == min(nw_90th)), 
+              which(nw_95th == min(nw_95th))
+)
+axis(1, at = nw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+
+### 1T-nsw {.tabset}
+
+<font size="5">Cumulative distribution of tokens, without stopwords</font>
+
+#### Twitter
+```{r cum1_tw_plot_nsw, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_tw_words1_nsw <- 1:length(tw_train_table1_nsw$Cum.Freq)
+plot(x = unique_tw_words1_nsw, tw_train_table1_nsw$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", xlim = c(0, 50000), axes = FALSE, 
+     xlab = "Unique Words", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of words appearing in twitter")
+box()
+
+tw_50th <- (tw_train_table1_nsw$Cum.Freq - 50)  ^ 2
+abline(v = which(tw_50th == min(tw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+tw_80th <- (tw_train_table1_nsw$Cum.Freq - 80)  ^ 2
+abline(v = which(tw_80th == min(tw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+tw_90th <- (tw_train_table1_nsw$Cum.Freq - 90)  ^ 2
+abline(v = which(tw_90th == min(tw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+tw_95th <- (tw_train_table1_nsw$Cum.Freq - 95)  ^ 2
+abline(v = which(tw_95th == min(tw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+tw_x_axis = c(which(tw_50th == min(tw_50th)), 
+              which(tw_80th == min(tw_80th)), 
+              which(tw_90th == min(tw_90th)), 
+              which(tw_95th == min(tw_95th))
+)
+axis(1, at = tw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+rm(unique_tw_words1_nsw, tw_50th, tw_80th, tw_90th, tw_95th, tw_x_axis)
+```
+
+#### Blogs
+```{r cum1_bg_plot_nsw, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_bg_words1_nsw <- 1:length(bg_train_table1_nsw$Cum.Freq)
+plot(x = unique_bg_words1_nsw, bg_train_table1_nsw$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", xlim = c(0, 50000), axes = FALSE, 
+     xlab = "Unique Words", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of words appearing in blogs")
+box()
+
+bg_50th <- (bg_train_table1_nsw$Cum.Freq - 50)  ^ 2
+abline(v = which(bg_50th == min(bg_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+bg_80th <- (bg_train_table1_nsw$Cum.Freq - 80)  ^ 2
+abline(v = which(bg_80th == min(bg_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+bg_90th <- (bg_train_table1_nsw$Cum.Freq - 90)  ^ 2
+abline(v = which(bg_90th == min(bg_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+bg_95th <- (bg_train_table1_nsw$Cum.Freq - 95)  ^ 2
+abline(v = which(bg_95th == min(bg_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+bg_x_axis = c(which(bg_50th == min(bg_50th)), 
+              which(bg_80th == min(bg_80th)), 
+              which(bg_90th == min(bg_90th)), 
+              which(bg_95th == min(bg_95th))
+)
+axis(1, at = bg_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+rm(unique_bg_words1_nsw, bg_50th, bg_80th, bg_90th, bg_95th, bg_x_axis)
+```
+
+#### News
+```{r cum1_nw_plot_nsw, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_nw_words1_nsw <- 1:length(nw_train_table1_nsw$Cum.Freq)
+plot(x = unique_nw_words1_nsw, nw_train_table1_nsw$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique Words", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of words appearing in news")
+box()
+
+nw_50th <- (nw_train_table1_nsw$Cum.Freq - 50)  ^ 2
+abline(v = which(nw_50th == min(nw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+nw_80th <- (nw_train_table1_nsw$Cum.Freq - 80)  ^ 2
+abline(v = which(nw_80th == min(nw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+nw_90th <- (nw_train_table1_nsw$Cum.Freq - 90)  ^ 2
+abline(v = which(nw_90th == min(nw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+nw_95th <- (nw_train_table1_nsw$Cum.Freq - 95)  ^ 2
+abline(v = which(nw_95th == min(nw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+nw_x_axis = c(which(nw_50th == min(nw_50th)), 
+              which(nw_80th == min(nw_80th)), 
+              which(nw_90th == min(nw_90th)), 
+              which(nw_95th == min(nw_95th))
+)
+axis(1, at = nw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+rm(unique_nw_words1_nsw, nw_50th, nw_80th, nw_90th, nw_95th, nw_x_axis)
+```
+
+### 2T {.tabset}
+
+<font size="5">Cumulative distribution of 2-ngrams</font>
+
+#### Twitter
+```{r cum2_tw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_tw_ngrams2 <- 1:length(tw_train_table2$Cum.Freq)
+plot(x = unique_tw_ngrams2, tw_train_table2$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 2-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in twitter")
+box()
+
+tw_50th <- (tw_train_table2$Cum.Freq - 50)  ^ 2
+abline(v = which(tw_50th == min(tw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+tw_80th <- (tw_train_table2$Cum.Freq - 80)  ^ 2
+abline(v = which(tw_80th == min(tw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+tw_90th <- (tw_train_table2$Cum.Freq - 90)  ^ 2
+abline(v = which(tw_90th == min(tw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+tw_95th <- (tw_train_table2$Cum.Freq - 95)  ^ 2
+abline(v = which(tw_95th == min(tw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+tw_x_axis = c(which(tw_50th == min(tw_50th)), 
+              which(tw_80th == min(tw_80th)), 
+              which(tw_90th == min(tw_90th)), 
+              which(tw_95th == min(tw_95th))
+)
+axis(1, at = tw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+```
+
+#### Blogs
+```{r cum2_bg_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_bg_ngrams2 <- 1:length(bg_train_table2$Cum.Freq)
+plot(x = unique_bg_ngrams2, bg_train_table2$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 2-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in blogs")
+box()
+
+bg_50th <- (bg_train_table2$Cum.Freq - 50)  ^ 2
+abline(v = which(bg_50th == min(bg_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+bg_80th <- (bg_train_table2$Cum.Freq - 80)  ^ 2
+abline(v = which(bg_80th == min(bg_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+bg_90th <- (bg_train_table2$Cum.Freq - 90)  ^ 2
+abline(v = which(bg_90th == min(bg_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+bg_95th <- (bg_train_table2$Cum.Freq - 95)  ^ 2
+abline(v = which(bg_95th == min(bg_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+bg_x_axis = c(which(bg_50th == min(bg_50th)), 
+              which(bg_80th == min(bg_80th)), 
+              which(bg_90th == min(bg_90th)), 
+              which(bg_95th == min(bg_95th))
+)
+axis(1, at = bg_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+#### News
+```{r cum2_nw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_nw_ngrams2 <- 1:length(nw_train_table2$Cum.Freq)
+plot(x = unique_nw_ngrams2, nw_train_table2$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 2-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in news")
+box()
+
+nw_50th <- (nw_train_table2$Cum.Freq - 50)  ^ 2
+abline(v = which(nw_50th == min(nw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+nw_80th <- (nw_train_table2$Cum.Freq - 80)  ^ 2
+abline(v = which(nw_80th == min(nw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+nw_90th <- (nw_train_table2$Cum.Freq - 90)  ^ 2
+abline(v = which(nw_90th == min(nw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+nw_95th <- (nw_train_table2$Cum.Freq - 95)  ^ 2
+abline(v = which(nw_95th == min(nw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+nw_x_axis = c(which(nw_50th == min(nw_50th)), 
+              which(nw_80th == min(nw_80th)), 
+              which(nw_90th == min(nw_90th)), 
+              which(nw_95th == min(nw_95th))
+)
+axis(1, at = nw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+### 2T-nsw {.tabset}
+
+<font size="5">Cumulative distribution of 2-ngrams, without stopwords</font>
+
+#### Twitter
+```{r cum2_tw_plot_nsw, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_tw_ngrams2_nsw <- 1:length(tw_train_table2_nsw$Cum.Freq)
+plot(x = unique_tw_ngrams2_nsw, tw_train_table2_nsw$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 2-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in twitter")
+box()
+
+tw_50th <- (tw_train_table2_nsw$Cum.Freq - 50)  ^ 2
+abline(v = which(tw_50th == min(tw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+tw_80th <- (tw_train_table2_nsw$Cum.Freq - 80)  ^ 2
+abline(v = which(tw_80th == min(tw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+tw_90th <- (tw_train_table2_nsw$Cum.Freq - 90)  ^ 2
+abline(v = which(tw_90th == min(tw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+tw_95th <- (tw_train_table2_nsw$Cum.Freq - 95)  ^ 2
+abline(v = which(tw_95th == min(tw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+tw_x_axis = c(which(tw_50th == min(tw_50th)), 
+              which(tw_80th == min(tw_80th)), 
+              which(tw_90th == min(tw_90th)), 
+              which(tw_95th == min(tw_95th))
+)
+axis(1, at = tw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+```
+
+#### Blogs
+```{r cum2_bg_plot_nsw, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_bg_ngrams2_nsw <- 1:length(bg_train_table2_nsw$Cum.Freq)
+plot(x = unique_bg_ngrams2_nsw, bg_train_table2_nsw$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 2-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in blogs")
+box()
+
+bg_50th <- (bg_train_table2_nsw$Cum.Freq - 50)  ^ 2
+abline(v = which(bg_50th == min(bg_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+bg_80th <- (bg_train_table2_nsw$Cum.Freq - 80)  ^ 2
+abline(v = which(bg_80th == min(bg_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+bg_90th <- (bg_train_table2_nsw$Cum.Freq - 90)  ^ 2
+abline(v = which(bg_90th == min(bg_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+bg_95th <- (bg_train_table2_nsw$Cum.Freq - 95)  ^ 2
+abline(v = which(bg_95th == min(bg_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+bg_x_axis = c(which(bg_50th == min(bg_50th)), 
+              which(bg_80th == min(bg_80th)), 
+              which(bg_90th == min(bg_90th)), 
+              which(bg_95th == min(bg_95th))
+)
+axis(1, at = bg_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+#### News
+```{r cum2_nw_plot_nsw, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_nw_ngrams2_nsw <- 1:length(nw_train_table2_nsw$Cum.Freq)
+plot(x = unique_nw_ngrams2_nsw, nw_train_table2_nsw$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 2-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in news")
+box()
+
+nw_50th <- (nw_train_table2_nsw$Cum.Freq - 50)  ^ 2
+abline(v = which(nw_50th == min(nw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+nw_80th <- (nw_train_table2_nsw$Cum.Freq - 80)  ^ 2
+abline(v = which(nw_80th == min(nw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+nw_90th <- (nw_train_table2_nsw$Cum.Freq - 90)  ^ 2
+abline(v = which(nw_90th == min(nw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+nw_95th <- (nw_train_table2_nsw$Cum.Freq - 95)  ^ 2
+abline(v = which(nw_95th == min(nw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+nw_x_axis = c(which(nw_50th == min(nw_50th)), 
+              which(nw_80th == min(nw_80th)), 
+              which(nw_90th == min(nw_90th)), 
+              which(nw_95th == min(nw_95th))
+)
+axis(1, at = nw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+### 3T {.tabset}
+
+<font size="5">Cumulative distribution of 3-ngrams</font>
+     
+#### Twitter
+```{r cum3_tw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_tw_ngrams3 <- 1:length(tw_train_table3$Cum.Freq)
+plot(x = unique_tw_ngrams3, tw_train_table3$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 3-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in twitter")
+box()
+
+tw_50th <- (tw_train_table3$Cum.Freq - 50)  ^ 2
+abline(v = which(tw_50th == min(tw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+tw_80th <- (tw_train_table3$Cum.Freq - 80)  ^ 2
+abline(v = which(tw_80th == min(tw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+tw_90th <- (tw_train_table3$Cum.Freq - 90)  ^ 2
+abline(v = which(tw_90th == min(tw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+tw_95th <- (tw_train_table3$Cum.Freq - 95)  ^ 2
+abline(v = which(tw_95th == min(tw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+tw_x_axis = c(which(tw_50th == min(tw_50th)), 
+              which(tw_80th == min(tw_80th)), 
+              which(tw_90th == min(tw_90th)), 
+              which(tw_95th == min(tw_95th))
+)
+axis(1, at = tw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+```
+
+#### Blogs
+```{r cum3_bg_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_bg_ngrams3 <- 1:length(bg_train_table3$Cum.Freq)
+plot(x = unique_bg_ngrams3, bg_train_table3$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 3-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in blogs")
+box()
+
+bg_50th <- (bg_train_table3$Cum.Freq - 50)  ^ 2
+abline(v = which(bg_50th == min(bg_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+bg_80th <- (bg_train_table3$Cum.Freq - 80)  ^ 2
+abline(v = which(bg_80th == min(bg_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+bg_90th <- (bg_train_table3$Cum.Freq - 90)  ^ 2
+abline(v = which(bg_90th == min(bg_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+bg_95th <- (bg_train_table3$Cum.Freq - 95)  ^ 2
+abline(v = which(bg_95th == min(bg_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+bg_x_axis = c(which(bg_50th == min(bg_50th)), 
+              which(bg_80th == min(bg_80th)), 
+              which(bg_90th == min(bg_90th)), 
+              which(bg_95th == min(bg_95th))
+)
+axis(1, at = bg_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+#### News
+```{r cum3_nw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_nw_ngrams3 <- 1:length(nw_train_table3$Cum.Freq)
+plot(x = unique_nw_ngrams3, nw_train_table3$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 3-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in news")
+box()
+
+nw_50th <- (nw_train_table3$Cum.Freq - 50)  ^ 2
+abline(v = which(nw_50th == min(nw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+nw_80th <- (nw_train_table3$Cum.Freq - 80)  ^ 2
+abline(v = which(nw_80th == min(nw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+nw_90th <- (nw_train_table3$Cum.Freq - 90)  ^ 2
+abline(v = which(nw_90th == min(nw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+nw_95th <- (nw_train_table3$Cum.Freq - 95)  ^ 2
+abline(v = which(nw_95th == min(nw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+nw_x_axis = c(which(nw_50th == min(nw_50th)), 
+              which(nw_80th == min(nw_80th)), 
+              which(nw_90th == min(nw_90th)), 
+              which(nw_95th == min(nw_95th))
+)
+axis(1, at = nw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+### 4T {.tabset}
+
+<font size="5">Cumulative distribution of 3-ngrams</font>
+     
+#### Twitter
+```{r cum4_tw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_tw_ngrams4 <- 1:length(tw_train_table4$Cum.Freq)
+plot(x = unique_tw_ngrams4, tw_train_table4$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 4-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in twitter")
+box()
+
+tw_50th <- (tw_train_table4$Cum.Freq - 50)  ^ 2
+abline(v = which(tw_50th == min(tw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+tw_80th <- (tw_train_table4$Cum.Freq - 80)  ^ 2
+abline(v = which(tw_80th == min(tw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+tw_90th <- (tw_train_table4$Cum.Freq - 90)  ^ 2
+abline(v = which(tw_90th == min(tw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+tw_95th <- (tw_train_table4$Cum.Freq - 95)  ^ 2
+abline(v = which(tw_95th == min(tw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+tw_x_axis = c(which(tw_50th == min(tw_50th)), 
+              which(tw_80th == min(tw_80th)), 
+              which(tw_90th == min(tw_90th)), 
+              which(tw_95th == min(tw_95th))
+)
+axis(1, at = tw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+```
+
+#### Blogs
+```{r cum4_bg_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_bg_ngrams4 <- 1:length(bg_train_table4$Cum.Freq)
+plot(x = unique_bg_ngrams4, bg_train_table4$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 4-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in blogs")
+box()
+
+bg_50th <- (bg_train_table4$Cum.Freq - 50)  ^ 2
+abline(v = which(bg_50th == min(bg_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+bg_80th <- (bg_train_table4$Cum.Freq - 80)  ^ 2
+abline(v = which(bg_80th == min(bg_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+bg_90th <- (bg_train_table4$Cum.Freq - 90)  ^ 2
+abline(v = which(bg_90th == min(bg_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+bg_95th <- (bg_train_table4$Cum.Freq - 95)  ^ 2
+abline(v = which(bg_95th == min(bg_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+bg_x_axis = c(which(bg_50th == min(bg_50th)), 
+              which(bg_80th == min(bg_80th)), 
+              which(bg_90th == min(bg_90th)), 
+              which(bg_95th == min(bg_95th))
+)
+axis(1, at = bg_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+#### News
+```{r cum4_nw_plot, fig.height = 5, fig.width = 8, fig.align = "center", cache = TRUE}
+unique_nw_ngrams4 <- 1:length(nw_train_table4$Cum.Freq)
+plot(x = unique_nw_ngrams4, nw_train_table4$Cum.Freq, type = "l", lwd = 1, 
+     col = "red", axes = FALSE, 
+     xlab = "Unique 4-ngrams", ylab = "Cumulative Frequency", 
+     main = "Cumulative Frequency of 2-ngrams appearing in news")
+box()
+
+nw_50th <- (nw_train_table4$Cum.Freq - 50)  ^ 2
+abline(v = which(nw_50th == min(nw_50th)), lty = 2, col = "blue")
+abline(h = 50, lty = 2, col = "blue")
+
+nw_80th <- (nw_train_table4$Cum.Freq - 80)  ^ 2
+abline(v = which(nw_80th == min(nw_80th)), lty = 2, col = "blue")
+abline(h = 80, lty = 2, col = "blue")
+
+nw_90th <- (nw_train_table4$Cum.Freq - 90)  ^ 2
+abline(v = which(nw_90th == min(nw_90th)), lty = 2, col = "blue")
+abline(h = 90, lty = 2, col = "blue")
+
+nw_95th <- (nw_train_table4$Cum.Freq - 95)  ^ 2
+abline(v = which(nw_95th == min(nw_95th)), lty = 2, col = "blue")
+abline(h = 95, lty = 2, col = "blue")
+
+nw_x_axis = c(which(nw_50th == min(nw_50th)), 
+              which(nw_80th == min(nw_80th)), 
+              which(nw_90th == min(nw_90th)), 
+              which(nw_95th == min(nw_95th))
+)
+axis(1, at = nw_x_axis, las = 1)
+axis(2, at = seq(0, 100, by = 10), las = 1)
+
+```
+
+```{r cleaning_Environment1, echo = FALSE}
+rm(unique_tw_words1, unique_bg_words1, unique_nw_words1)
+rm(unique_tw_words1_nsw, unique_bg_words1_nsw, unique_nw_words1_nsw)
+rm(unique_tw_ngrams2, unique_bg_ngrams2, unique_nw_ngrams2)
+rm(unique_tw_ngrams2_nsw, unique_bg_ngrams2_nsw, unique_nw_ngrams2_nsw)
+rm(unique_tw_ngrams3, unique_bg_ngrams3, unique_nw_ngrams3)
+rm(unique_tw_ngrams4, unique_bg_ngrams4, unique_nw_ngrams4)
+rm(tw_x_axis, bg_x_axis, nw_x_axis)
+rm(tw_50th, tw_80th, tw_90th, tw_95th)
+rm(bg_50th, bg_80th, bg_90th, bg_95th)
+rm(nw_50th, nw_80th, nw_90th, nw_95th)
+```
+
+## 2.5 Interpreting the cumulative frequency plots
+
+What we notice in the cumulative frequency plots is very straight forward. When 
+dealing with single words, we reach the 90% of total words with a relatively 
+small number of unique words. In this sense, predicting the first word to be 
+typed should be easy (mainly, if we restrict ourselves to only analyzing the 
+first word typed in every sentence in our data sets). However, ngrams represent 
+permutations of n words, and reaching even the 50% of posible ngrams takes us 
+into the hundreds of thousands of posibilities.
+
+So, having 4-token ngrams may be way better for predicting the fourth word typed 
+given the previous three words. However, the amount of data needed for this prediction 
+is a clear setback we have to weight.
+
+# 3. Next Steps
+
+For the following steps, we have to try prediction models and test them, subject to 
+computational restraints, and choose the project which best results shows in terms 
+of efficiency.
+The Idea is to deploy the final product on a shiny app, as well as a presentation 
+to pitch the app.
