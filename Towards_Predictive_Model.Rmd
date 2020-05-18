@@ -1,0 +1,359 @@
+---
+title: "Into the Text Prediction App"
+author: "Diogenes Cruz Figueroa García"
+date: "4/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, message = FALSE, warning = FALSE)
+```
+
+
+# 1 Synopsis
+In this document, I show the approach I followed towards generating the shiny 
+app for the Coursera - JHU Data Science Specialization Capston. The app is a 
+simple text predictor which sugests a number of words based on what's been 
+written before, using some Natural Language Processing. [Here](insert.shiny) 
+you can find the Shiny App, whereas the pitch for the app can be found 
+[here](pitch)
+
+# 2 Background
+The last report I submited was the mileston report, which can be seen in RPubs 
+clicking on the following 
+[link](https://rpubs.com/DiogenesCFG/C-JHU_Capstone_Week2_Milestone_Report). 
+Since then, I have started almost from zero, since the methods I was using to 
+clean the data and generate ngrams was innecessarily long, and then I learned 
+about the package `tidytext`, which has a very easy function for generating 
+ngrams, and ending up with a tidy table which can be then easily used for 
+training our text prediction app. So let's get to it.
+
+# Getting and Cleaning Data
+We already downloaded our data, and cleaned it, but as I said, I wanted to 
+start fresh from zero... well, not downloading the data again, but processing 
+it and generating our ngrams. Besides, last time, I treated separately the 
+text from blogs, news and twitter. Here, I'll merge all the data bases samples 
+from the beginning to avoid any complication.
+
+Also, in my Predictive_Text.Rmd` document, which can also be found in my 
+[github account](https://github.com/DiogenesCFG/Coursera_Capstone_Project) 
+you can see how I got the data. But I won't be downloading it again. For obious 
+reasons. So, let's get to it.
+
+# Getting, cleaning and processing data
+
+Before starting, I'll load all packages I'll be using here... well, not all 
+of them are actually being used, but in the trial and error, I might have 
+loaded a package that didn't make the final cut, but it's still interesting 
+to have a look at them and see what they do.
+
+```{r load_packages}
+library(LaF); library(dplyr); library(tidyr); library(ggplot2); library(tm);
+library(tokenizers); library(stringi); library(quanteda); library(data.table); 
+library(stringr); library(knitr); library(caret); library(tidytext)
+```
+
+The first step is to get our data. We'll go straight to it, and get only a 
+sample of the data from blogs, news and twitter, corresponding to 5% of the 
+lines in each data set, and merge them together. Though this may seem small, 
+we'll still end up with over 150 thousand lines, which, when translated to 
+quadgrams, will give us enough information to train a simple text prediction 
+app.
+
+```{r Getting_data}
+# Set the path in our directory where the data is stored.
+
+twitterFile <- ".\\Data\\final\\en_US\\en_US.twitter.txt"
+blogsFile <- ".\\Data\\final\\en_US\\en_US.blogs.txt"
+newsFile <- ".\\Data\\final\\en_US\\en_US.news.txt"
+
+# Get whole data set
+twitter <- readLines(twitterFile, encoding = "UTF-8", skipNul = TRUE)
+blogs <- readLines(blogsFile, encoding = "UTF-8", skipNul = TRUE)
+news <- readLines(newsFile, encoding = "UTF-8", skipNul = TRUE)
+
+# Convert to data frame to better treat them and merge them
+twitter <- data_frame(text = twitter)
+blogs <- data_frame(text = blogs)
+news <- data_frame(text = news)
+
+# Getting a sample from our data
+set.seed(122814)
+s_twitter <- sample_n(twitter, nrow(twitter) * .2)
+s_twitter <- mutate(s_twitter, source = "twtitter")
+
+s_blogs <- sample_n(blogs, nrow(blogs) * .2)
+s_blogs <- mutate(s_blogs, source = "blogs")
+
+s_news <- sample_n(news, nrow(news) * .2)
+s_news <- mutate(s_news, source = "news")
+
+# Merging the dataset samples
+sample <- bind_rows(s_twitter, s_blogs, s_news)
+
+# We're going to work from now on only with the merged sample, so let's clear everything else.
+rm(twitterFile, blogsFile, newsFile, twitter, blogs, news, s_twitter, 
+   s_blogs, s_news)
+```
+
+Now we have a single dataset consisting of `r nrow(sample)` lines from twitter, 
+blogs and news sites. We then need to clean the data. Since there is a 
+difference between caps and lowercase letters, we'll convert everything to 
+lowercase to get more accurate results. We'll also get rid of punctuation 
+marks, and special symbols ($#%&! and what not). Once we have that, we can 
+procede to get our ngrams.
+
+```{r cleaning_the_data}
+# Convert to ASCII to avoid special characters
+sample$text <- iconv(sample$text, from = "UTF-8", to = "ASCII//TRANSLIT")
+# Get only lower caps
+sample$text <- tolower(sample$text)
+# Since numbers are difficult to predict and add little to no information for 
+# predicting, we'll also get rid of those
+sample$text <- gsub("[0-9]", "", sample$text)
+# I had a dilema here of what to do with apostrophes,... at the end, I figured 
+# I will just treat them as empty characters
+sample$text <- gsub("'", "", sample$text)
+# Remove special characters
+sample$text <- str_replace_all(sample$text, "[^[:alnum:]]", " ")
+# Remove double spacing
+sample$text <- str_squish(sample$text)
+```
+
+Now we have a clean data base consisting of normal characters and sentences.
+In total, we have 166,833 lines, each line being either a complete tweet, a 
+complete news article, or a complete blog entry. Such a number may not seem 
+as much, but when converted to ngrams, our number of observations will 
+increase dramatically. In my mileston report, I created the unigrams and 
+bigrams without stopwords (common words such as "the", "and" "of"...) that 
+appear to often to give any information on word frequency. However, for a 
+text prediction app, this words have to appear, otherwise our text prediction 
+app will end up creating sentences like "going house get something drink" 
+instead of a more readable sentence like "I'm going to my house now to get 
+something to drink." The former sentence is still understandable, but c'mon, 
+nobody talks like that, except maybe 
+[Kevin, from The Office](https://www.youtube.com/watch?v=_K-L9uhsBLM). But 
+we don't want to get into that.
+
+So let's get to geting our ngrams. We'll use the `unnest_tokens()` function 
+from the `tidytext` package, which makes use of the `tokenizers`package. 
+Last time I did't know this function existed in this package, so I just 
+created my own function that sepparated the ngrams, and gave the relative 
+frequency of each one, collapsed them and what not, but it took a lot of 
+memory and time to compile, whereas `unnest_tokens()` uses way less resources, 
+and I can collapse and get the relative frequency later.
+
+```{r getting_ngrams}
+# Unigrams (Or, you know, as common people know them, words)
+ngram1 <- sample %>% 
+     unnest_tokens(unigram, text)
+# Bigrams
+ngram2 <- sample %>% 
+     unnest_tokens(bigram, text, token = "ngrams", n = 2)
+# Trigrams
+ngram3 <- sample %>% 
+     unnest_tokens(trigram, text, token = "ngrams", n = 3)
+# Quadgrams
+ngram4 <- sample %>% 
+     unnest_tokens(quadgram, text, token = "ngrams", n = 4)
+```
+
+We now have four data bases consisting of observations of ngrams, which can 
+be repeated. But we are more interested in the frequency of each ngram, so as 
+to better predict the word that will follow some combinations of words. So 
+we'll make our tables in this sense.
+
+```{r collapsing_ngrams}
+ngram1 <- ngram1 %>%
+     count(unigram) %>%  
+     mutate(proportion = n / sum(n)) %>%
+     arrange(desc(proportion)) %>%  
+     mutate(coverage = cumsum(proportion))
+ngram2 <- ngram2 %>%
+     count(bigram) %>%  
+     mutate(proportion = n / sum(n)) %>%
+     arrange(desc(proportion)) %>%  
+     mutate(coverage = cumsum(proportion))
+ngram3 <- ngram3 %>%
+     count(trigram) %>%  
+     mutate(proportion = n / sum(n)) %>%
+     arrange(desc(proportion)) %>%  
+     mutate(coverage = cumsum(proportion))
+ngram4 <- ngram4 %>%
+     count(quadgram) %>%  
+     mutate(proportion = n / sum(n)) %>%
+     arrange(desc(proportion)) %>%  
+     mutate(coverage = cumsum(proportion))
+```
+
+Now that we have our ngrams, we'll separate the words. The way we'll do this 
+is consider the last word to be the objective, and count backwards the 
+preceding words. For example, if we have an ngram "this is the last", the 
+word "last" will be in the "word" variable, whereas "the" will be "word-1", 
+that is, one position to the left, "is" will be in "word-2" and "this" in 
+"word-3". 
+
+Why do it this way? It just makes way more sense in my head, since we'll be 
+predicting a word using the previous ones. So, let's do this for all the 
+ngrams.
+
+```{r separating_words}
+# The unigram needs no separation, but let's just rename the column
+names(ngram1)[1] <- "word"
+
+# Now, we separate an name the rest of the ngrams
+ngram2 <- ngram2 %>% 
+     separate(bigram, 
+              c("word_1", "word"), 
+              sep = " ")
+ngram3 <- ngram3 %>% 
+     separate(trigram, 
+              c("word_2", "word_1", "word"), 
+              sep = " ")
+ngram4 <- ngram4 %>% 
+     separate(quadgram, 
+              c("word_3", "word_2", "word_1", "word"), 
+              sep = " ")
+```
+
+Now that we have our separated databases, let's save them as they are, to 
+avoid all the hastle again, and we can use these data bases for prediction.
+
+```{r save_separated_ngrams}
+if(!file.exists(".\\Separated Ngrams")){dir.create(".\\Separated Ngrams")}
+
+saveRDS(ngram1, ".\\Separated Ngrams\\ngram1.rds")
+saveRDS(ngram2, ".\\Separated Ngrams\\ngram2.rds")
+saveRDS(ngram3, ".\\Separated Ngrams\\ngram3.rds")
+saveRDS(ngram4, ".\\Separated Ngrams\\ngram4.rds")
+```
+
+We can now use these ngrams to make a simple text prediction model. What we 
+are going to do is to take a text as an input, with at least `n-1` words, where 
+`n > 2`. We'll look in the ngram with `n`tokens, and see if there is a match 
+for the phrase, and take the most frequent ngram that shows said match for the 
+first `n-1` words. The function then will display the `n`th word of such 
+ngram. In the case there is no match, the function will remove the first word 
+of the phrase, and use the same procedure with the `n-1` tokens ngram. And so 
+on. So, let's do this. With an empty input, suggestions will simply be the 
+most common used words.
+
+```{r building_prediction_functions}
+# I want my app to give three suggestions.
+# In the worst case scenario where no prediction can be made, our program is 
+# goint to suggest the three most common words.
+top3 <- c(as.character(ngram1[1, 1]), 
+            as.character(ngram1[2, 1]), 
+            as.character(ngram1[3, 1]))
+
+# Predicting from the last word, with bigrams
+pred2 <- function(textInput){
+     # Getting the last word
+          firstWord <- tail(strsplit(textInput, split = " ")[[1]], 1)[1]
+     Filtered <- filter(ngram2, word_1 == firstWord)[1:3, ]
+     Suggestion <- Filtered[1:3, 2]
+     if(is.na(Suggestion[1, 1])){
+          print(top3)
+     } else { 
+          c(as.character(Suggestion[1, 1]), 
+            as.character(Suggestion[2, 1]), 
+            as.character(Suggestion[3, 1])
+          )
+     }
+}
+
+# Predicting from the last two words, with trigrams
+pred3 <- function(textInput){
+     # Getting the last two words
+          firstWord <- tail(strsplit(textInput, split = " ")[[1]], 2)[2]
+          secondWord <- tail(strsplit(textInput, split = " ")[[1]], 2)[1]
+     Filtered <- filter(ngram3, word_1 == firstWord & 
+                             word_2 == secondWord)[1:3, ]
+     Suggestion <- Filtered[1:3, 3]
+     if(is.na(Suggestion[1, 1])){
+          pred2(textInput)
+     } else { 
+          c(as.character(Suggestion[1, 1]), 
+            as.character(Suggestion[2, 1]), 
+            as.character(Suggestion[3, 1])
+          )
+     }
+}
+
+# Predicting from the last three words, with quadgrams
+pred4 <- function(textInput){
+     # Getting the last three words words
+     firstWord <- tail(strsplit(textInput, split = " ")[[1]], 3)[3]
+     secondWord <- tail(strsplit(textInput, split = " ")[[1]], 3)[2]
+     thirdWord <- tail(strsplit(textInput, split = " ")[[1]], 3)[1]
+     Filtered <- filter(ngram4, word_1 == firstWord & 
+                             word_2 == secondWord & 
+                             word_3 == thirdWord)[1:3, ]
+     Suggestion <- Filtered[1:3, 4]
+     if(is.na(Suggestion[1, 1])){
+          pred3(textInput)
+     } else { 
+          c(as.character(Suggestion[1, 1]), 
+            as.character(Suggestion[2, 1]), 
+            as.character(Suggestion[3, 1])
+          )
+     }
+}
+
+```
+
+In the last chunk I created 3 functions that predict the next word of a phrase 
+based on the previous word: 
+* `pred2`takes the last word of the phrase, and matches it with the first word 
+of the bigrams. Then it takes the most common words that follow that last word 
+of our original phrase and gives it as an output. In case no match is found, 
+the function just suggests the most common words overall from our unigrams.
+* `pred3` takes the last two words of the phrase, and matches it with exactly 
+the first two words of the trigrams. Then it takes the most common words that 
+follow that last two words of our original phrase and gives them as an output. 
+In case no match is found, the function redirects the input phrase to the 
+`pred2` function.
+* `pred4` takes the last three words of the phrase, and matches it with 
+exactly the first three words of the quadgrams. Then it takes the most common 
+words that follow that last three words of our original phrase and gives them 
+as an output. In case no match is found, the function redirects the input 
+phrase to the `pred3` function.
+
+Notice that that from either of these functions, a suggestion will be given, 
+since they will redirect to a simpler function, until only the most common 
+words are given as outputs in case no other match is made.
+
+The last step is to build a function that chooses from which `pred`function to 
+start with, in order to save time (and avoid an error message). This function 
+will be quiet simple, and will only take the input phrase, see how many words 
+it has, and choose the `pred` function accordingly: `pred2`if only one word is 
+given, `pred3` if only two words are given, and `pred4`if 3 or more words are 
+given. This function will also suggest the most common three words in case the 
+input is empty. This function will start cleaning the prhase so that when the 
+input goes into the `pred` functions, a match can be made. Since the function 
+that will be directly used will be this `predictText()` function, there is no 
+need to repeat the text cleaning procedure in the `pred` functions. 
+
+```{r choose_pred_function}
+predictText <- function(Input){
+     # First, clean the text
+     textInput <- tolower(Input)
+     textInput <- gsub("[0-9]", "", textInput)
+     textInput <- gsub("'", "", textInput)
+     textInput <- str_replace_all(textInput, "[^[:alnum:]]", " ")
+     textInput <- str_squish(textInput)
+     # Now, count the number of words in the phrase
+     inputLength <- str_count(textInput, '\\w+')
+     if(inputLength == 0){
+          top3
+     } else if(inputLength == 1){
+          pred2(textInput)
+     } else if(inputLength == 2){
+          pred3(textInput)
+     } else {
+          pred4(textInput)
+     }
+}
+```
+
+So that's our function for getting a prediction for the next word from our text prediction.

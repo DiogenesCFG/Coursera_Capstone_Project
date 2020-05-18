@@ -1,0 +1,12 @@
+name: Coursera_Capstone_Project
+title: Coursera_Capstone_Project
+username:
+account: diogenescfg
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 2315324
+bundleId: 3159646
+url: https://diogenescfg.shinyapps.io/Coursera_Capstone_Project/
+when: 1589765941.07365
+asMultiple: FALSE
+asStatic: FALSE

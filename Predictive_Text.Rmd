@@ -174,7 +174,7 @@ list_tokens <- function(x, ngrams = 1, stopwords = TRUE, lan = "english"){
      table$Token <- as.character(table$Token)
      return(table)
 }
-
+if(!file.exists(".\\ManipulatedData")){dir.create(".\\ManipulatedData")}
 if(!file.exists(".\\ManipulatedData\\Samples")){dir.create(".\\ManipulatedData\\Samples")}
 write.csv(s_twitter, file = ".\\ManipulatedData\\Samples\\s_twitter.csv")
 write.csv(s_blogs, file = ".\\ManipulatedData\\Samples\\s_blogs.csv")
