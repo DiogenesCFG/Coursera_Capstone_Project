@@ -4,7 +4,7 @@ suppressPackageStartupMessages({
     library(stringr)
 })
 
-source("D:\\Users\\dcruz\\Documents\\Coursera_Capstone_Project\\Separated Ngrams\\ngrams.R")
+source("ngrams.R")
 
 ui <- fluidPage(
     titlePanel("Text Prediction App"),

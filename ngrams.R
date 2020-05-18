@@ -1,7 +1,7 @@
-ngram1 <- readRDS("D:\\Users\\dcruz\\Documents\\Coursera_Capstone_Project\\Separated Ngrams\\ngram1.rds")
-ngram2 <- readRDS("D:\\Users\\dcruz\\Documents\\Coursera_Capstone_Project\\Separated Ngrams\\ngram2.rds")
-ngram3 <- readRDS("D:\\Users\\dcruz\\Documents\\Coursera_Capstone_Project\\Separated Ngrams\\ngram3.rds")
-ngram4 <- readRDS("D:\\Users\\dcruz\\Documents\\Coursera_Capstone_Project\\Separated Ngrams\\ngram4.rds")
+ngram1 <- readRDS("ngram1.rds")
+ngram2 <- readRDS("ngram2.rds")
+ngram3 <- readRDS("ngram3.rds")
+ngram4 <- readRDS("ngram4.rds")
 
 top3 <- c(as.character(ngram1[1, 1]), 
           as.character(ngram1[2, 1]), 
